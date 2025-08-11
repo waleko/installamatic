@@ -18,57 +18,30 @@ pip install -r requirements.txt
 The following are the specific versions of the software used in the experiments found in the paper:
 - Python 3.10.12
 - Local machine OS: Ubuntu 22.04.4 LTS
-- Virtual machine OS: Ubuntu 22.04.4 LTS
 - Docker version: 27.1.2
 
-### Virtual Machine Setup
-In order to verify the successful installation of a repository,
-a dockerfile is constructed and sent to a virtual machine to be executed. \\
-As such, a virtual machine is needed to make use of the code in this repository.
-Create an [ubuntu](https://ubuntu.com/download/desktop) machine on [virtual box](https://www.virtualbox.org/) with the following properties:
-- MACHINE_NAME = "ub"
-- USER_NAME = "machine"
-- PWD = "123"
+### Local Docker Setup (no VM required)
+This repository now runs Docker builds locally (no VirtualBox/SSH). Ensure Docker is installed and running on your machine.
+Follow the official instructions for your OS: `https://docs.docker.com/engine/install/`.
 
-It is recommended to allocate A large amount of storage to the virtual machine. 100Gb was allocated when conducting the experiments found in the paper. Alternatively, you can use the pre-made ubuntu disk image that is provided as part of the artifact.
-
-Additionally, port forwarding needs to be enabled.
-See [this](https://dev.to/developertharun/easy-way-to-ssh-into-virtualbox-machine-any-os-just-x-steps-5d9i) tutorial for instructions.
-The host port should be `3022`.
-
-### Install + setup docker
-Docker needs to be installed in the virtual machine, using the steps outlined [here](https://docs.docker.com/engine/install/ubuntu/).
-
-Then the `docker` group needs to be created and the user added to it:
+Then add your user to the `docker` group and verify access:
 ```bash
-sudo groupadd docker
+sudo groupadd docker || true
 sudo usermod -aG docker $USER
 sudo systemctl restart docker
 newgrp docker
 sudo chmod 666 /var/run/docker.sock
 ```
 
-verify that the setup was successful by running `sudo docker run hello-world`.
-
-### Install openssh and git
-To enable ssh connection to the virtual machine, `openssh-server` also needs to be installed:
+Verify Docker works:
 ```bash
-sudo apt-get install openssh-server
-
-sudo systemctl start ssh
-sudo systemctl enable ssh
-
-```
-Once ssh has been enabled on your virtual machine, you need to ssh into once manually to allow to script to do so automatically later:
-```
-ssh -p 3022 machine@localhost
+docker run hello-world
 ```
 
-Git also needs to be installed to clone the taget repositories:
+Git is required to clone target repositories:
 ```bash
-sudo apt-get install git-all
+sudo apt-get install -y git-all
 ```
-
 
 ## Usage
 
@@ -93,6 +66,15 @@ Installation attempts on a single repository can also be attempted:
 python main.py --repo https://github.com/Textualize/rich.git
 ```
 If `repo` is not provided, the default repo, [fastapi](https://github.com/tiangolo/fastapi.git) will be targeted for classification instead.
+
+### New build interface (flat/local)
+- The `VMController` class now performs all actions locally:
+  - Clone target repo into a local temp dir
+  - Copy the provided Dockerfile into the repo as `Dockerfile`
+  - Run `docker build` locally and stream logs to `logs/build_logs/<repo>-N<n>.log`
+  - Clean up the temp directory and optionally remove the temporary image
+- No VirtualBox, SSH, or VM user configuration is required.
+- Cache cleanup uses `docker system prune -a -f` locally.
 
 ### Inspecting results
 

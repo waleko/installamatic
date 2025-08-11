@@ -9,6 +9,8 @@ import uuid
 from difflib import get_close_matches
 from io import TextIOWrapper
 from typing import List, Optional
+import shutil
+import tempfile
 
 from install_test.consts import BUILD_LOGS, FASTAPI
 from install_test.utils import notify
@@ -16,11 +18,6 @@ from git_scraping import get_repository_language
 
 
 SETUP_FILE = "resources/setup.sh"
-MACHINE_NAME = "ub"
-USER_NAME = "machine"
-PWD = "123"
-HOST_PORT = "3022"
-DOCKER_NAME = "lmmilliken"
 IMAGE_NAME = "temp_image"
 TIMEOUT = 60 * 20
 
@@ -53,95 +50,74 @@ class VMController:
         if os.path.exists(dockerfile):
             return dockerfile
         else:
-            return ValueError(f"No dockerfile found for langauge: {language}")
+            raise ValueError(f"No dockerfile found for langauge: {language}")
 
     def open_machine(self):
-        """Opens the to use for testing, if the machine is already running, does nothing."""
-
-        machines = subprocess.run(
-            ["VBoxManage", "list", "vms"], capture_output=True
-        ).stdout.decode("utf-8")
-
-        if '"' + MACHINE_NAME + '"' not in machines:
-            raise ValueError(f"no machine named {MACHINE_NAME}")
-        running_machines = str(
-            subprocess.run(
-                ["VBoxManage", "list", "runningvms"], capture_output=True
-            ).stdout
-        )
-        if '"' + MACHINE_NAME + '"' not in running_machines:
-            response = str(
-                subprocess.run(
-                    f"VBoxManage startvm {MACHINE_NAME} --type headless".split(" "),
-                    capture_output=True,
-                ).stdout
+        """No-op on local mode. Ensure Docker is available locally."""
+        try:
+            subprocess.run(["docker", "version"], check=True, capture_output=True)
+            self.log("Docker detected locally.")
+        except Exception:
+            raise RuntimeError(
+                "Docker does not seem to be available locally. Please install and start Docker."
             )
-            if "successfully started" not in response:
-                raise ValueError(f"failed to start machine")
-            else:
-                self.log("started machine")
-        else:
-            self.log("machine already started")
 
     def setup_repo(self, target_repo: str, dockerfile: str, ref: Optional[str] = None):
         """
-        Clones target repo in a temporary directory within the vm,
-        then sends the dockerfile via scp.
+        Clone target repo into a local temporary directory,
+        then copy the dockerfile into the repo as Dockerfile.
         """
         # make temp directory
-        cmd = (
-            f"sshpass -p {PWD} ssh -p {HOST_PORT} {USER_NAME}@localhost "
-            f"echo $(mktemp -d)"
-        )
-        tmp_dir = (
-            subprocess.run(cmd.split(" "), capture_output=True)
-            .stdout.decode("utf-8")
-            .strip()
-        )
+        tmp_dir = tempfile.mkdtemp(prefix="repo_build_")
         self.log(f"TEMP DIR: {tmp_dir}")
         # clone target repo in temp directory
         repo_name = target_repo.split("/")[-1][:-4]
-        cmd = (
-            f"/usr/bin/sshpass -p {PWD} ssh -T -p {HOST_PORT} {USER_NAME}@localhost "
-            f"cd {tmp_dir} ; git clone --recursive {target_repo} ; cd {repo_name} ; rm .dockerignore"
-        )
-        if ref is not None:
-            cmd = cmd + f"; git checkout {ref}"
-        cmd = cmd.split(" ")
-
         try:
-            resp = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT)
+            resp = subprocess.run(
+                ["git", "clone", "--recursive", target_repo],
+                cwd=tmp_dir,
+                capture_output=True,
+                timeout=TIMEOUT,
+            )
         except subprocess.TimeoutExpired:
-            resp = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT)
+            resp = subprocess.run(
+                ["git", "clone", "--recursive", target_repo],
+                cwd=tmp_dir,
+                capture_output=True,
+                timeout=TIMEOUT,
+            )
 
         self.log(resp.stderr.decode("utf-8").strip())
         self.log(resp.stdout.decode("utf-8").strip())
 
         # get name of the directory where the repo was cloned to (-4 to remove '.git')
-        repo_name = target_repo.split("/")[-1][:-4]
-        repo_dir = f"{tmp_dir}/{repo_name}"
+        repo_dir = os.path.join(tmp_dir, repo_name)
         print(repo_dir)
-        # send dockerfile to vm
-        subprocess.run(
-            (
-                f"/usr/bin/sshpass -p {PWD} "
-                f"scp -P {HOST_PORT} "
-                "-oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null "
-                f"{dockerfile} {USER_NAME}@localhost:{repo_dir}/Dockerfile"
-            ).split(" ")
-        )
-        dockerfile = dockerfile.split("/")[-1]
+
+        # optionally checkout specific ref
+        if ref is not None:
+            subprocess.run(["git", "checkout", ref], cwd=repo_dir, capture_output=True)
+
+        # remove .dockerignore if it exists
+        dockerignore_path = os.path.join(repo_dir, ".dockerignore")
+        if os.path.exists(dockerignore_path):
+            try:
+                os.remove(dockerignore_path)
+            except Exception:
+                pass
+
+        # copy dockerfile into repo
+        shutil.copyfile(dockerfile, os.path.join(repo_dir, "Dockerfile"))
         return tmp_dir, repo_dir
 
     def build_project(self, repo_dir: str, logs: str) -> bool:
-        """Run docker build in the virtual machine and stream progress."""
-        # build dockerfile
-        cmd = (
-            f"sshpass -p {PWD} ssh -p {HOST_PORT} "
-            "-oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null "
-            f"{USER_NAME}@localhost "
-            f"cd {repo_dir} ; docker build --no-cache -t {IMAGE_NAME} ."
-        ).split(" ")
+        """Run docker build locally and stream progress."""
+        # build dockerfile locally
+        cmd = [
+            "bash",
+            "-lc",
+            f"cd {repo_dir} ; docker build --no-cache -t {IMAGE_NAME} .",
+        ]
         with open(logs, "a") as f:
             progress, timeout = self.monitor_process(cmd, f, TIMEOUT)
         if timeout:
@@ -187,9 +163,7 @@ class VMController:
             return False
         if not passed:
             try:
-                err = "Error running docker build on virtual machine:\n" + "\n".join(
-                    [p.decode("utf-8") for p in progress.stderr]
-                )
+                err = "Error running docker build locally."
                 self.log(err)
                 print(err)
             except:
@@ -198,7 +172,7 @@ class VMController:
         else:
             succ = (
                 "At least 1 test passed.\n"
-                "Docker build completed successfully on virtual machine."
+                "Docker build completed successfully locally."
             )
             self.log(succ)
             print(succ)
@@ -236,33 +210,33 @@ class VMController:
         return progress, timeout
 
     def clear_cache(self):
-        subprocess.run(
-            (
-                f"/usr/bin/sshpass -p {PWD} ssh -T -p {HOST_PORT} {USER_NAME}@localhost "
-                "docker system prune -a -f"
-            ).split(" "),
-        )
+        subprocess.run(["docker", "system", "prune", "-a", "-f"])
 
     def cleanup(self, tmp_dir: str, keep_image: bool = False, keep_repo: bool = False):
         """Delete docker image and temporary file after execution."""
         if not keep_image:
-            # remove newly created docker image
-            self.log("removing docker image...")
-            subprocess.run(
-                (
-                    f"sshpass -p {PWD} ssh -T -p {HOST_PORT} {USER_NAME}@localhost "
-                    f"docker image rm {IMAGE_NAME}"
-                ).split(" "),
-            )
+            # remove newly created docker image if it exists
+            try:
+                inspect = subprocess.run(
+                    ["docker", "image", "inspect", IMAGE_NAME],
+                    capture_output=True,
+                )
+                if inspect.returncode == 0:
+                    self.log("removing docker image...")
+                    subprocess.run(
+                        ["docker", "image", "rm", "-f", IMAGE_NAME],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception:
+                pass
         if not keep_repo:
             # clear temp directory
             self.log("clearing temp directory")
-            subprocess.run(
-                (
-                    f"/usr/bin/sshpass -p {PWD} ssh -T -p {HOST_PORT} {USER_NAME}@localhost "
-                    f"rm -rf {tmp_dir}"
-                ).split(" "),
-            )
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def test_dockerfile(
         self,
@@ -274,8 +248,8 @@ class VMController:
         ref: Optional[str] = None,
     ):
         """
-        Tests a dockerfile by connecting to a virtual machine,
-        sending the dockerfile to the vm and then building the docker image inside the vm.
+        Test a dockerfile by cloning the repo locally, copying the Dockerfile,
+        and building the Docker image locally.
         """
 
         if dockerfile is None:
@@ -320,14 +294,16 @@ def test_dockerfile(
     vmc: Optional[VMController] = None,
     ref: Optional[str] = None,
 ) -> bool:
-    dockerfile_path = "logs/dockerfiles/Dockerfile"
+    os.makedirs("logs/dockerfiles", exist_ok=True)
     name = url.split("/")[-1][:-4]
+    dockerfile_path = os.path.join("logs", "dockerfiles", "Dockerfile")
 
     with open(dockerfile_path, "w") as f:
         f.write(dockerfile)
     print(dockerfile)
 
     if vmc is None:
+        os.makedirs(BUILD_LOGS, exist_ok=True)
         logs = f"{BUILD_LOGS}/{repo_name or name}.log"
         vmc = VMController(logs)
 
@@ -341,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dockerfile",
         help="path to a dockerfile you want to test",
-        default="resources/working_dockerfiles/20k+/fastapi.dockerfile",
+        default="resources/fastapi.dockerfile",
     )
     parser.add_argument(
         "--repo", help="url to a repo you want to test", default=FASTAPI
