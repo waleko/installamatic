@@ -215,9 +215,21 @@ class VMController:
     def cleanup(self, tmp_dir: str, keep_image: bool = False, keep_repo: bool = False):
         """Delete docker image and temporary file after execution."""
         if not keep_image:
-            # remove newly created docker image
-            self.log("removing docker image...")
-            subprocess.run(["docker", "image", "rm", IMAGE_NAME])
+            # remove newly created docker image if it exists
+            try:
+                inspect = subprocess.run(
+                    ["docker", "image", "inspect", IMAGE_NAME],
+                    capture_output=True,
+                )
+                if inspect.returncode == 0:
+                    self.log("removing docker image...")
+                    subprocess.run(
+                        ["docker", "image", "rm", "-f", IMAGE_NAME],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception:
+                pass
         if not keep_repo:
             # clear temp directory
             self.log("clearing temp directory")
